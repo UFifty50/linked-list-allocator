@@ -61,7 +61,7 @@ impl<const SEGMENTS: usize> SegmentedHeap<SEGMENTS> {
     pub const fn empty() -> Self {
         Self {
             used: 0,
-            holes: unsafe { core::mem::zeroed() },
+            holes: core::array::from_fn(|_| HoleList::empty()),
         }
     }
 
@@ -75,8 +75,8 @@ impl<const SEGMENTS: usize> SegmentedHeap<SEGMENTS> {
         // Applies the allocation function to each hole list and returns the first successful allocation
         .find_map(|list| list.allocate_first_fit(layout));
         
-        if let Some((allocation, layout)) = allocation {
-            self.used += layout.size();
+        if let Some((allocation, aligned)) = allocation {
+            self.used += aligned.size();
             Some(allocation)
         } else {
             None
@@ -114,7 +114,8 @@ impl<const SEGMENTS: usize> SegmentedHeap<SEGMENTS> {
         unsafe {
             self.holes
             .iter()
-            .map(|hole_list| hole_list.top.offset_from(hole_list.bottom) as usize)
+            .filter(|1| !1.bottom.is_null())
+            .map(|1| 1.top.offset_from(1.bottom) as usize)
             .sum()
         }
     }
@@ -198,6 +199,32 @@ impl<const SEGMENTS: usize> SegmentedHeap<SEGMENTS> {
             // reference handed to us by the caller.
             self.holes[index] = unsafe {HoleList::new((*region).as_mut_ptr().cast(), region.len())};
         }
+    }
+
+    /// Extends the size of a specific segment in the heap by creating a new hole at the end.
+    ///
+    /// # Arguments
+    ///
+    /// * `segment` - The index of the segment (hole list) to extend.
+    /// * `by` - The number of bytes to extend the segment by.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the segment index is out of bounds.
+    ///
+    /// # Safety
+    ///
+    /// The amount of data given in `by` MUST exist directly after the original
+    /// range of data provided when constructing the segment. The additional data
+    /// must have the same lifetime of the original range of data.
+    pub unsafe fn extend_segment(&mut self, segment: usize, by: usize) {
+        assert!(
+            segment < SEGMENTS,
+            "Segment index {} out of bounds (max {})",
+            segment,
+            SEGMENTS - 1
+        );
+        self.holes[segment].extend(by);
     }
 }
 

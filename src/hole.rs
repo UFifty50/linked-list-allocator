@@ -384,10 +384,6 @@ impl HoleList {
     ///
     /// This function uses the “first fit” strategy, so it uses the first hole that is big
     /// enough. Thus the runtime is in O(n) but it should be reasonably fast for small allocations.
-    //
-    // NOTE: We could probably replace this with an `Option` instead of a `Result` in a later
-    // release to remove this clippy warning
-    #[allow(clippy::result_unit_err)]
     pub fn allocate_first_fit(&mut self, layout: Layout) -> Option<(NonNull<u8>, Layout)> {
         let aligned_layout = Self::align_layout(layout).ok()?;
         let mut cursor = self.cursor()?;
@@ -396,10 +392,9 @@ impl HoleList {
             match cursor.split_current(aligned_layout) {
                 Ok((ptr, _len)) => {
                     return Some((
-                        // SAFETY: This can not be null as it is derived from a NonNull pointer in `split_current`
-                        unsafe { NonNull::new_unchecked(ptr) }
-                    , aligned_layout
-                ));
+                        NonNull::new(ptr).unwrap(),
+                        aligned_layout
+                    ));
                 }
                 Err(curs) => {
                     cursor = curs.next()?;
@@ -423,7 +418,7 @@ impl HoleList {
     /// The function performs exactly the same layout adjustments as [`allocate_first_fit`] and
     /// returns the aligned layout.
     pub unsafe fn deallocate(&mut self, ptr: NonNull<u8>, layout: Layout) -> Layout {
-        let aligned_layout = Self::align_layout(layout).expect("This should never error, as the validity was checked during allocation.");
+        let aligned_layout = Self::align_layout(layout).unwrap_or_else(|e| panic!("align_layout({layout:?}) failed in deallocate: {e}"));
         deallocate(self, ptr.as_ptr(), aligned_layout.size());
         aligned_layout
     }
