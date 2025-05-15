@@ -114,13 +114,23 @@ fn new_heap_skip(ct: usize) -> OwnedHeap<1000> {
 }
 
 #[test]
+/// ```
 fn empty() {
     let mut heap = Heap::empty();
     let layout = Layout::from_size_align(1, 1).unwrap();
-    assert!(heap.allocate_first_fit(layout.clone()).is_err());
+    assert!(heap.allocate_first_fit(layout.clone()).is_none());
 }
 
 #[test]
+/// Tests that allocating more memory than the heap contains fails as expected.
+///
+/// Attempts to allocate a block larger than the heap size and asserts that allocation returns `None`.
+///
+/// # Examples
+///
+/// ```
+/// oom(); // Should not panic; allocation fails as expected.
+/// ```
 fn oom() {
     const HEAP_SIZE: usize = 1000;
     let (heap_space_ptr, data_ptr) = Chonk::<HEAP_SIZE>::new();
@@ -131,22 +141,32 @@ fn oom() {
 
     let layout = Layout::from_size_align(heap.size() + 1, align_of::<usize>());
     let addr = heap.allocate_first_fit(layout.unwrap());
-    assert!(addr.is_err());
+    assert!(addr.is_none());
 
     // Explicitly unleak the heap allocation
     unsafe { Chonk::unleak(heap_space_ptr) };
 }
 
 #[test]
+/// Tests allocation of a block twice the size of a `usize` and verifies heap state.
+///
+/// Allocates a block of size `2 * usize` from a new heap, checks that the allocation occurs at the heap's bottom,
+/// and asserts that the remaining hole starts immediately after the allocated block with the correct size.
+///
+/// # Examples
+///
+/// ```
+/// allocate_double_usize();
+/// ```
 fn allocate_double_usize() {
     let mut heap = new_heap();
     let size = size_of::<usize>() * 2;
     let layout = Layout::from_size_align(size, align_of::<usize>());
     let addr = heap.allocate_first_fit(layout.unwrap());
-    assert!(addr.is_ok());
+    assert!(addr.is_some());
     let addr = addr.unwrap().as_ptr();
     assert!(addr == heap.bottom());
-    let (hole_addr, hole_size) = heap.holes.first_hole().expect("ERROR: no hole left");
+    let (hole_addr, hole_size) = heap.holes[0].first_hole().expect("ERROR: no hole left");
     assert!(hole_addr == heap.bottom().wrapping_add(size));
     assert!(hole_size == heap.size() - size);
 
@@ -159,6 +179,14 @@ fn allocate_double_usize() {
 }
 
 #[test]
+/// Allocates and then deallocates a double-`usize` block, verifying that the heap's hole list is correctly restored to its initial state.
+///
+/// # Examples
+///
+/// ```
+/// allocate_and_free_double_usize();
+/// // No panic means the heap correctly reclaims and merges the freed block.
+/// ```
 fn allocate_and_free_double_usize() {
     let mut heap = new_heap();
 
@@ -168,7 +196,7 @@ fn allocate_and_free_double_usize() {
         *(x.as_ptr() as *mut (usize, usize)) = (0xdeafdeadbeafbabe, 0xdeafdeadbeafbabe);
 
         heap.deallocate(x, layout.clone());
-        let real_first = heap.holes.first.next.as_ref().unwrap().as_ref();
+        let real_first = heap.holes[0].first.next.as_ref().unwrap().as_ref();
 
         assert_eq!(real_first.size, heap.size());
         assert!(real_first.next.is_none());
@@ -258,6 +286,15 @@ fn reallocate_double_usize() {
 }
 
 #[test]
+/// Exhaustively tests heap allocation and deallocation for a wide range of sizes, alignments, and free patterns.
+///
+/// Allocates memory blocks of varying sizes and alignments using the heap, then deallocates them in different orders (forward, backward, interleaved). After each pattern, verifies that the heap can be fully reused by allocating the maximum possible block.
+///
+/// # Examples
+///
+/// ```
+/// allocate_many_size_aligns(); // Runs comprehensive allocation/deallocation tests on the heap.
+/// ```
 fn allocate_many_size_aligns() {
     use core::ops::{Range, RangeInclusive};
 
@@ -279,7 +316,7 @@ fn allocate_many_size_aligns() {
     let aligned_heap_size = align_down_size(1000, size_of::<usize>());
     assert_eq!(heap.size(), aligned_heap_size);
 
-    heap.holes.debug();
+    heap.holes[0].debug();
 
     let max_alloc = Layout::from_size_align(aligned_heap_size, 1).unwrap();
     let full = heap.allocate_first_fit(max_alloc).unwrap();
@@ -287,7 +324,7 @@ fn allocate_many_size_aligns() {
         heap.deallocate(full, max_alloc);
     }
 
-    heap.holes.debug();
+    heap.holes[0].debug();
 
     struct Alloc {
         alloc: NonNull<u8>,
@@ -310,9 +347,9 @@ fn allocate_many_size_aligns() {
                 let mut allocs = vec![];
 
                 let layout = Layout::from_size_align(size, 1 << align).unwrap();
-                while let Ok(alloc) = heap.allocate_first_fit(layout) {
+                while let Some(alloc) = heap.allocate_first_fit(layout) {
                     #[cfg(not(miri))]
-                    heap.holes.debug();
+                    heap.holes[0].debug();
                     allocs.push(Alloc { alloc, layout });
                 }
 
@@ -325,7 +362,7 @@ fn allocate_many_size_aligns() {
                         allocs.drain(..).for_each(|a| unsafe {
                             heap.deallocate(a.alloc, a.layout);
                             #[cfg(not(miri))]
-                            heap.holes.debug();
+                            heap.holes[0].debug();
                         });
                     }
                     1 => {
@@ -333,7 +370,7 @@ fn allocate_many_size_aligns() {
                         allocs.drain(..).rev().for_each(|a| unsafe {
                             heap.deallocate(a.alloc, a.layout);
                             #[cfg(not(miri))]
-                            heap.holes.debug();
+                            heap.holes[0].debug();
                         });
                     }
                     2 => {
@@ -350,12 +387,12 @@ fn allocate_many_size_aligns() {
                         a.drain(..).for_each(|a| unsafe {
                             heap.deallocate(a.alloc, a.layout);
                             #[cfg(not(miri))]
-                            heap.holes.debug();
+                            heap.holes[0].debug();
                         });
                         b.drain(..).for_each(|a| unsafe {
                             heap.deallocate(a.alloc, a.layout);
                             #[cfg(not(miri))]
-                            heap.holes.debug();
+                            heap.holes[0].debug();
                         });
                     }
                     3 => {
@@ -372,12 +409,12 @@ fn allocate_many_size_aligns() {
                         a.drain(..).for_each(|a| unsafe {
                             heap.deallocate(a.alloc, a.layout);
                             #[cfg(not(miri))]
-                            heap.holes.debug();
+                            heap.holes[0].debug();
                         });
                         b.drain(..).for_each(|a| unsafe {
                             heap.deallocate(a.alloc, a.layout);
                             #[cfg(not(miri))]
-                            heap.holes.debug();
+                            heap.holes[0].debug();
                         });
                     }
                     _ => panic!(),
@@ -469,15 +506,25 @@ fn allocate_multiple_unaligned() {
 }
 
 #[test]
+/// ```
 fn allocate_usize() {
     let mut heap = new_heap();
 
     let layout = Layout::from_size_align(size_of::<usize>(), 1).unwrap();
 
-    assert!(heap.allocate_first_fit(layout.clone()).is_ok());
+    assert!(heap.allocate_first_fit(layout.clone()).is_some());
 }
 
 #[test]
+/// Tests that a freed block can be reused for a smaller allocation.
+///
+/// Allocates two double-`usize` blocks, frees one, then allocates a single `usize` block and verifies it reuses the freed space.
+///
+/// # Examples
+///
+/// ```
+/// allocate_usize_in_bigger_block();
+/// ```
 fn allocate_usize_in_bigger_block() {
     let mut heap = new_heap();
 
@@ -491,7 +538,7 @@ fn allocate_usize_in_bigger_block() {
     }
 
     let z = heap.allocate_first_fit(layout_2.clone());
-    assert!(z.is_ok());
+    assert!(z.is_some());
     let z = z.unwrap();
     assert_eq!(x, z);
 
@@ -502,7 +549,16 @@ fn allocate_usize_in_bigger_block() {
 }
 
 #[test]
-// see https://github.com/phil-opp/blog_os/issues/160
+/// Tests heap allocation with increasing alignment requirements.
+///
+/// Allocates a 28-byte block with 4-byte alignment, followed by an 8-byte block with 8-byte alignment, verifying that the heap correctly handles alignment constraints when the heap end is not initially aligned to the larger requirement.
+///
+/// # Examples
+///
+/// ```
+/// align_from_small_to_big();
+/// // Should not panic; both allocations succeed with correct alignment.
+/// ```
 fn align_from_small_to_big() {
     let mut heap = new_heap();
 
@@ -510,12 +566,13 @@ fn align_from_small_to_big() {
     let layout_2 = Layout::from_size_align(8, 8).unwrap();
 
     // allocate 28 bytes so that the heap end is only 4 byte aligned
-    assert!(heap.allocate_first_fit(layout_1.clone()).is_ok());
+    assert!(heap.allocate_first_fit(layout_1.clone()).is_some());
     // try to allocate a 8 byte aligned block
-    assert!(heap.allocate_first_fit(layout_2.clone()).is_ok());
+    assert!(heap.allocate_first_fit(layout_2.clone()).is_some());
 }
 
 #[test]
+/// ```
 fn extend_empty_heap() {
     let mut heap = new_max_heap();
 
@@ -525,24 +582,42 @@ fn extend_empty_heap() {
 
     // Try to allocate full heap after extend
     let layout = Layout::from_size_align(2048, 1).unwrap();
-    assert!(heap.allocate_first_fit(layout.clone()).is_ok());
+    assert!(heap.allocate_first_fit(layout.clone()).is_some());
 }
 
 #[test]
+/// Tests that a heap can be fully allocated, extended, and then fully allocated again.
+///
+/// Allocates the entire initial heap, extends it by 1024 bytes, and verifies that the extended space can also be fully allocated.
+///
+/// # Examples
+///
+/// ```
+/// extend_full_heap();
+/// ```
 fn extend_full_heap() {
     let mut heap = new_max_heap();
 
     let layout = Layout::from_size_align(1024, 1).unwrap();
 
     // Allocate full heap, extend and allocate again to the max
-    assert!(heap.allocate_first_fit(layout.clone()).is_ok());
+    assert!(heap.allocate_first_fit(layout.clone()).is_some());
     unsafe {
         heap.extend(1024);
     }
-    assert!(heap.allocate_first_fit(layout.clone()).is_ok());
+    assert!(heap.allocate_first_fit(layout.clone()).is_some());
 }
 
 #[test]
+/// Tests heap extension behaviour when the heap is fragmented.
+///
+/// Allocates two blocks, deallocates the first to create a hole, extends the heap, and verifies that a large allocation can be made in the newly extended space.
+///
+/// # Examples
+///
+/// ```
+/// extend_fragmented_heap();
+/// ```
 fn extend_fragmented_heap() {
     let mut heap = new_max_heap();
 
@@ -552,8 +627,8 @@ fn extend_fragmented_heap() {
     let alloc1 = heap.allocate_first_fit(layout_1.clone());
     let alloc2 = heap.allocate_first_fit(layout_1.clone());
 
-    assert!(alloc1.is_ok());
-    assert!(alloc2.is_ok());
+    assert!(alloc1.is_some());
+    assert!(alloc2.is_some());
 
     unsafe {
         // Create a hole at the beginning of the heap
@@ -566,7 +641,7 @@ fn extend_fragmented_heap() {
 
     // We got additional 1024 bytes hole at the end of the heap
     // Try to allocate there
-    assert!(heap.allocate_first_fit(layout_2.clone()).is_ok());
+    assert!(heap.allocate_first_fit(layout_2.clone()).is_some());
 }
 
 /// Ensures that `Heap::extend` fails for very small sizes.
@@ -574,25 +649,33 @@ fn extend_fragmented_heap() {
 /// The size needs to be big enough to hold a hole, otherwise
 /// the hole write would result in an out of bounds write.
 #[test]
+/// Tests that extending the heap by a single byte sets the pending extension flag without corrupting heap state.
+///
+/// # Examples
+///
+/// ```
+/// small_heap_extension();
+/// ```
 fn small_heap_extension() {
     // define an array of `u64` instead of `u8` for alignment
     static mut HEAP: [u64; 5] = [0; 5];
     unsafe {
         let mut heap = Heap::new(HEAP.as_mut_ptr().cast(), 32);
         heap.extend(1);
-        assert_eq!(1, heap.holes.pending_extend);
+        assert_eq!(1, heap.holes[0].pending_extend);
     }
 }
 
 /// Ensures that `Heap::extend` fails for sizes that are not a multiple of the hole size.
 #[test]
+/// ```
 fn oddly_sized_heap_extension() {
     // define an array of `u64` instead of `u8` for alignment
     static mut HEAP: [u64; 5] = [0; 5];
     unsafe {
         let mut heap = Heap::new(HEAP.as_mut_ptr().cast(), 16);
         heap.extend(17);
-        assert_eq!(1, heap.holes.pending_extend);
+        assert_eq!(1, heap.holes[0].pending_extend);
         assert_eq!(16 + 16, heap.size());
     }
 }
@@ -602,16 +685,23 @@ fn oddly_sized_heap_extension() {
 /// To extend the heap, we need to place a hole at the old top of the heap. This
 /// only works if the top pointer is sufficiently aligned.
 #[test]
+/// Tests heap extension behaviour when the heap size is not aligned, ensuring pending extension flags are handled correctly and the final heap size is accurate.
+///
+/// # Examples
+///
+/// ```
+/// extend_odd_size();
+/// ```
 fn extend_odd_size() {
     // define an array of `u64` instead of `u8` for alignment
     static mut HEAP: [u64; 6] = [0; 6];
     unsafe {
         let mut heap = Heap::new(HEAP.as_mut_ptr().cast(), 17);
-        assert_eq!(1, heap.holes.pending_extend);
+        assert_eq!(1, heap.holes[0].pending_extend);
         heap.extend(16);
-        assert_eq!(1, heap.holes.pending_extend);
+        assert_eq!(1, heap.holes[0].pending_extend);
         heap.extend(15);
-        assert_eq!(0, heap.holes.pending_extend);
+        assert_eq!(0, heap.holes[0].pending_extend);
         assert_eq!(17 + 16 + 15, heap.size());
     }
 }

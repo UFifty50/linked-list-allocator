@@ -388,17 +388,37 @@ impl HoleList {
     // NOTE: We could probably replace this with an `Option` instead of a `Result` in a later
     // release to remove this clippy warning
     #[allow(clippy::result_unit_err)]
-    pub fn allocate_first_fit(&mut self, layout: Layout) -> Result<(NonNull<u8>, Layout), ()> {
-        let aligned_layout = Self::align_layout(layout).map_err(|_| ())?;
-        let mut cursor = self.cursor().ok_or(())?;
+    /// Allocates memory using the first-fit strategy, returning a pointer and aligned layout on success.
+    ///
+    /// Searches the list of free memory holes for the first block large enough to satisfy the requested layout, after alignment adjustments. If a suitable hole is found, splits it and returns a pointer to the allocated memory along with the aligned layout. Returns `None` if no suitable hole is available.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::alloc::Layout;
+    /// let mut list = HoleList::empty();
+    /// // Assume list is initialised with a suitable hole.
+    /// let layout = Layout::from_size_align(32, 8).unwrap();
+    /// if let Some((ptr, used_layout)) = list.allocate_first_fit(layout) {
+    ///     assert_eq!(used_layout.size(), 32);
+    ///     // Use `ptr` as needed...
+    /// }
+    /// ```
+    pub fn allocate_first_fit(&mut self, layout: Layout) -> Option<(NonNull<u8>, Layout)> {
+        let aligned_layout = Self::align_layout(layout).ok()?;
+        let mut cursor = self.cursor()?;
 
         loop {
             match cursor.split_current(aligned_layout) {
                 Ok((ptr, _len)) => {
-                    return Ok((NonNull::new(ptr).ok_or(())?, aligned_layout));
+                    return Some((
+                        // SAFETY: This can not be null as it is derived from a NonNull pointer in `split_current`
+                        unsafe { NonNull::new_unchecked(ptr) }
+                    , aligned_layout
+                ));
                 }
                 Err(curs) => {
-                    cursor = curs.next().ok_or(())?;
+                    cursor = curs.next()?;
                 }
             }
         }
@@ -417,9 +437,27 @@ impl HoleList {
     /// `ptr` must be a pointer returned by a call to the [`allocate_first_fit`] function with
     /// identical layout. Undefined behavior may occur for invalid arguments.
     /// The function performs exactly the same layout adjustments as [`allocate_first_fit`] and
-    /// returns the aligned layout.
-    pub unsafe fn deallocate(&mut self, ptr: NonNull<u8>, layout: Layout) -> Layout {
-        let aligned_layout = Self::align_layout(layout).unwrap();
+    /// Frees a previously allocated memory block and returns its aligned layout.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `ptr` and `layout` correspond to a valid allocation previously returned by this allocator, and that the memory is not accessed after deallocation.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::alloc::{Layout, alloc, dealloc};
+    /// use std::ptr::NonNull;
+    ///
+    /// let layout = Layout::from_size_align(32, 8).unwrap();
+    /// let mut list = HoleList::empty();
+    /// // Assume list is properly initialised and allocation has occurred.
+    /// let ptr = NonNull::new(alloc(layout)).unwrap();
+    /// let aligned = unsafe { list.deallocate(ptr, layout) };
+    /// assert!(aligned.size() >= 32);
+    /// ```
+    pub unsafe fn deallocate(&mut self, ptr: NonNull<u8>, layout: Layout) -> Layout    pub unsafe fn deallocate(&mut self, ptr: NonNull<u8>, layout: Layout) -> Layout {
+        let aligned_layout = Self::align_layout(layout).expect("This should never error, as the validity was checked during allocation.");
         deallocate(self, ptr.as_ptr(), aligned_layout.size());
         aligned_layout
     }
@@ -689,7 +727,7 @@ pub mod test {
     #[test]
     fn cursor() {
         let mut heap = new_heap();
-        let curs = heap.holes.cursor().unwrap();
+        let curs = heap.holes[0].cursor().unwrap();
         // This is the "dummy" node
         assert_eq!(curs.previous().size, 0);
         // This is the "full" heap

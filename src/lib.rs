@@ -28,36 +28,288 @@ pub mod hole;
 mod test;
 
 /// A fixed size heap backed by a linked list of free memory blocks.
-pub struct Heap {
+/*pub struct Heap {
     used: usize,
     holes: HoleList,
+} */
+pub struct SegmentedHeap<const SEGMENTS: usize> {
+    used: usize,
+    holes: [HoleList; SEGMENTS]
 }
 
-#[cfg(fuzzing)]
+pub type Heap = SegmentedHeap<1>;
+
+#[cfg(any(test, fuzzing))]
 impl Heap {
+    /// Prints debugging information about the heap, including boundaries, size, and the state of the first segment's free list.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut heap = Heap::from_slice(&mut [MaybeUninit::uninit(); 1024]);
+    /// heap.debug(); // Prints heap boundaries and free list details
+    /// ```
     pub fn debug(&mut self) {
         println!(
             "bottom: {:?}, top: {:?}, size: {}, pending: {}",
             self.bottom(),
             self.top(),
             self.size(),
-            self.holes.first.size,
+            self.holes[0].first.size,
         );
-        self.holes.debug();
+        self.holes[0].debug();
     }
 }
 
 unsafe impl Send for Heap {}
 
-impl Heap {
-    /// Creates an empty heap. All allocate calls will return `None`.
-    pub const fn empty() -> Heap {
-        Heap {
+
+impl<const SEGMENTS: usize> SegmentedHeap<SEGMENTS> {
+    /// Returns a new heap instance with no allocated or available memory.
+    ///
+    /// All allocation attempts on the returned heap will fail and return `None`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let heap = SegmentedHeap::<2>::empty();
+    /// assert_eq!(heap.used(), 0);
+    /// assert_eq!(heap.size(), 0);
+    /// assert!(heap.allocate_first_fit(Layout::from_size_align(8, 8).unwrap()).is_none());
+    /// ```    pub const fn empty() -> Self {
+        Self {
             used: 0,
-            holes: HoleList::empty(),
+            holes: unsafe { core::mem::zeroed() },
         }
     }
 
+    /// Allocates a chunk of the given size with the given alignment. Returns a pointer to the
+    /// beginning of that chunk if it was successful. Else it returns `None`.
+    /// This function scans the list of free memory blocks and uses the first block that is big
+    /// enough. The runtime is in O(n) where n is the number of free blocks, but it should be
+    /// Allocates memory using the first-fit strategy across all segments.
+    ///
+    /// Scans each segment's free list and allocates the first available block that fits the requested layout. Increments the total used size on success.
+    ///
+    /// # Returns
+    ///
+    /// Returns a pointer to the allocated memory on success, or `None` if no suitable block is found.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use core::alloc::Layout;
+    /// let mut heap = Heap::empty();
+    /// unsafe { heap.init(HEAP_START as *mut u8, HEAP_SIZE); }
+    /// let layout = Layout::from_size_align(32, 8).unwrap();
+    /// let ptr = heap.allocate_first_fit(layout);
+    /// assert!(ptr.is_some());
+    /// ```    pub fn allocate_first_fit(&mut self, layout: Layout) -> Option<NonNull<u8>> {
+        let allocation = self.holes.iter_mut()
+        // Applies the allocation function to each hole list and returns the first successful allocation
+        .find_map(|list| list.allocate_first_fit(layout));
+        
+        if let Some((allocation, layout)) = allocation {
+            self.used += layout.size();
+            Some(allocation)
+        } else {
+            None
+        }
+    }
+
+    /// Frees the given allocation. `ptr` must be a pointer returned
+    /// by a call to the `allocate_first_fit` function with identical size and alignment.
+    ///
+    /// This function walks the list of free memory blocks and inserts the freed block at the
+    /// correct place. If the freed block is adjacent to another free block, the blocks are merged
+    /// again. This operation is in `O(n)` since the list needs to be sorted by address.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must be a pointer returned by a call to the [`allocate_first_fit`] function with
+    /// Deallocates a previously allocated memory block from the appropriate segment.
+    ///
+    /// # Safety
+    ///
+    /// The `ptr` and `layout` must exactly match a prior allocation from this allocator. Passing an invalid pointer or mismatched layout results in undefined behaviour. Panics if the pointer does not belong to any segment.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use core::alloc::Layout;
+    /// # use core::ptr::NonNull;
+    /// # use my_allocator::{Heap, SegmentedHeap};
+    /// let mut heap = Heap::empty();
+    /// unsafe {
+    ///     heap.init(HEAP_START as *mut u8, HEAP_SIZE);
+    ///     let layout = Layout::from_size_align(64, 8).unwrap();
+    ///     if let Some(ptr) = heap.allocate_first_fit(layout) {
+    ///         heap.deallocate(ptr, layout);
+    ///     }
+    /// }
+    /// ```    pub unsafe fn deallocate(&mut self, ptr: NonNull<u8>, layout: Layout) {
+        for hole_list in self.holes.iter_mut() {
+            // If the pointer is in the hole list's memory range, deallocate from that list and exit
+            if ptr.as_ptr() >= hole_list.bottom && ptr.as_ptr() < hole_list.top {
+                self.used -= hole_list.deallocate(ptr, layout).size();
+                return;
+            }
+        }
+        panic!("The pointer for deallocation does not match any of the allocator's memory ranges.");
+    }
+
+    /// Returns the size of the heap.
+    ///
+    /// This is the size the heap is using for allocations, not necessarily the
+    /// total amount of bytes given to the heap. To determine the exact memory
+    /// Returns the total size in bytes of all heap segments combined.
+    ///
+    /// The size is calculated as the sum of the memory ranges managed by each segment. To obtain the boundaries of individual segments, use [`bottom`][Self::bottom] and [`top`][Self::top].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut heap = Heap::empty();
+    /// unsafe { heap.init(HEAP_START as *mut u8, HEAP_SIZE); }
+    /// assert_eq!(heap.size(), HEAP_SIZE);
+    /// ```    pub fn size(&self) -> usize {
+        unsafe {
+            self.holes
+            .iter()
+            .map(|hole_list| hole_list.top.offset_from(hole_list.bottom) as usize)
+            .sum()
+        }
+    }
+
+    /// Returns the total number of bytes currently allocated across all segments of the heap.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut heap = Heap::empty();
+    /// assert_eq!(heap.used(), 0);
+    /// ```    pub fn used(&self) -> usize {
+        self.used
+    }
+
+    /// Returns the total number of free bytes available across all heap segments.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut heap = Heap::from_slice(&mut [MaybeUninit::uninit(); 1024]);
+    /// assert_eq!(heap.free(), 1024);
+    /// ```    pub fn free(&self) -> usize {
+        self.size() - self.used
+    }
+
+    /// Initializes an empty heap
+    ///
+    /// The `heap_bottom` pointer is automatically aligned, so the [`bottom()`][Self::bottom]
+    /// method might return a pointer that is larger than `heap_bottom` after construction.
+    ///
+    /// The given `heap_size`s must be large enough to store the required
+    /// metadata, otherwise this function will panic. Depending on the
+    /// alignment of the `hole_addr` pointer, the minimum size is between
+    /// `2 * size_of::<usize>` and `3 * size_of::<usize>`.
+    ///
+    /// The usable size for allocations will be truncated to the nearest
+    /// alignment of `align_of::<usize>`. Any extra bytes left at the end
+    /// will be reclaimed once sufficient additional space is given to
+    /// [`extend`][Heap::extend].
+    ///
+    /// # Safety
+    ///
+    /// This function must be called at most once and must only be used on an
+    /// empty heap.
+    ///
+    /// The bottom addresses must be valid and the memory in the
+    /// `[heap_bottom, heap_bottom + heap_size)` range must not be used for anything else and must not overlap.
+    /// This function is unsafe because it can cause undefined behavior if the given addresses
+    /// are invalid.
+    ///
+    /// Initialises each segment of the heap from an array of raw pointer and size pairs.
+    ///
+    /// The provided memory regions must be valid, non-overlapping, and have `'static` lifetime. Resets the heap's used byte count to zero.
+    ///
+    /// # Safety
+    ///
+    /// Each pointer and size pair must describe a valid, writable memory region that remains accessible for the lifetime of the heap. Overlapping or invalid regions result in undefined behaviour.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use core::mem::MaybeUninit;
+    /// use my_allocator::SegmentedHeap;
+    ///
+    /// static mut REGION1: [MaybeUninit<u8>; 1024] = MaybeUninit::uninit_array();
+    /// static mut REGION2: [MaybeUninit<u8>; 2048] = MaybeUninit::uninit_array();
+    ///
+    /// let mut heap = SegmentedHeap::<2>::empty();
+    /// unsafe {
+    ///     heap.init_from_pointers([
+    ///         (REGION1.as_mut_ptr() as *mut u8, REGION1.len()),
+    ///         (REGION2.as_mut_ptr() as *mut u8, REGION2.len()),
+    ///     ]);
+    /// }
+    /// ```    pub unsafe fn init_from_pointers(&mut self, heaps: [(*mut u8, usize); SEGMENTS]) {
+        self.used = 0;
+        for (index, (heap_bottom, heap_size)) in heaps.iter().enumerate() {
+            self.holes[index] = HoleList::new(*heap_bottom, *heap_size)
+        }
+    }
+
+    /// Initialize an empty heap with provided memory.
+    ///
+    /// The caller is responsible for procuring a region of raw memory that may be utilized by the
+    /// allocator. This might be done via any method such as (unsafely) taking a region from the
+    /// program's memory, from a mutable static, or by allocating and leaking such memory from
+    /// another allocator.
+    ///
+    /// The latter approach may be especially useful if the underlying allocator does not perform
+    /// deallocation (e.g. a simple bump allocator). Then the overlaid linked-list-allocator can
+    /// provide memory reclamation.
+    ///
+    /// The usable size for allocations will be truncated to the nearest
+    /// alignment of `align_of::<usize>`. Any extra bytes left at the end
+    /// will be reclaimed once sufficient additional space is given to
+    /// [`extend`][Heap::extend].
+    ///
+    /// # Panics
+    ///
+    /// This method panics if the heap is already initialized.
+    ///
+    /// It also panics when the length of the given `mem` slice is not large enough to
+    /// store the required metadata. Depending on the alignment of the slice, the minimum
+    /// Initialises each segment of the heap from a mutable slice of uninitialised bytes.
+    ///
+    /// Panics if the heap has already been initialised.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use core::mem::MaybeUninit;
+    /// let mut region1 = [MaybeUninit::<u8>::uninit(); 1024];
+    /// let mut region2 = [MaybeUninit::<u8>::uninit(); 2048];
+    /// let mut heap = SegmentedHeap::<2>::empty();
+    /// heap.init_from_slices([&mut region1, &mut region2]);
+    /// ```    pub fn init_from_slices(&mut self, mut regions: [&'static mut [MaybeUninit<u8>]; SEGMENTS]) {
+        assert!(
+            self.holes.iter().all(|h| h.bottom.is_null()),
+            "The heap has already been initialized."
+        );
+        for (index, region) in regions.iter_mut().enumerate() {
+            // SAFETY: All initialization requires the bottom address to be valid, which implies it
+            // must not be 0. Initially the address is 0. The assertion above ensures that no
+            // initialization had been called before.
+            // The given address and size is valid according to the safety invariants of the mutable
+            // reference handed to us by the caller.
+            self.holes[index] = unsafe {HoleList::new((*region).as_mut_ptr().cast(), region.len())};
+        }
+    }
+}
+
+impl Heap {
     /// Initializes an empty heap
     ///
     /// The `heap_bottom` pointer is automatically aligned, so the [`bottom()`][Self::bottom]
@@ -83,10 +335,29 @@ impl Heap {
     /// This function is unsafe because it can cause undefined behavior if the given address
     /// is invalid.
     ///
-    /// The provided memory range must be valid for the `'static` lifetime.
-    pub unsafe fn init(&mut self, heap_bottom: *mut u8, heap_size: usize) {
+    /// Initialises the heap with a single memory region.
+    ///
+    /// The provided memory range must be valid for the `'static` lifetime and must not overlap with any other heap region. Resets the heap's used byte count to zero and sets up the free block list for allocation.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `heap_bottom` points to a valid, non-overlapping memory region of at least `heap_size` bytes, and that the region remains valid for the duration of the program.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use core::mem::MaybeUninit;
+    /// use my_allocator::Heap;
+    ///
+    /// let mut mem = [MaybeUninit::uninit(); 1024];
+    /// let mut heap = Heap::empty();
+    /// unsafe {
+    ///     heap.init(mem.as_mut_ptr() as *mut u8, mem.len());
+    /// }
+    /// assert_eq!(heap.size(), 1024);
+    /// ```    pub unsafe fn init(&mut self, heap_bottom: *mut u8, heap_size: usize) {
         self.used = 0;
-        self.holes = HoleList::new(heap_bottom, heap_size);
+        self.holes[0] = HoleList::new(heap_bottom, heap_size);
     }
 
     /// Initialize an empty heap with provided memory.
@@ -149,11 +420,24 @@ impl Heap {
     /// This function is unsafe because it can cause undefined behavior if the given address
     /// is invalid.
     ///
-    /// The provided memory range must be valid for the `'static` lifetime.
-    pub unsafe fn new(heap_bottom: *mut u8, heap_size: usize) -> Heap {
+    /// Creates a new single-segment heap from a raw pointer and size.
+    ///
+    /// # Safety
+    ///
+    /// The provided memory region must be valid, non-overlapping, and remain accessible for the entire program lifetime.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use core::mem::MaybeUninit;
+    /// use my_allocator::Heap;
+    ///
+    /// let mut buf = [MaybeUninit::uninit(); 4096];
+    /// let heap = unsafe { Heap::new(buf.as_mut_ptr() as *mut u8, buf.len()) };
+    /// ```    pub unsafe fn new(heap_bottom: *mut u8, heap_size: usize) -> Heap {
         Heap {
             used: 0,
-            holes: HoleList::new(heap_bottom, heap_size),
+            holes: [HoleList::new(heap_bottom, heap_size)],
         }
     }
 
@@ -161,8 +445,16 @@ impl Heap {
     ///
     /// This is a convenience function that has the same effect as calling
     /// [`init_from_slice`] on an empty heap. All the requirements of `init_from_slice`
-    /// apply to this function as well.
-    pub fn from_slice(mem: &'static mut [MaybeUninit<u8>]) -> Heap {
+    /// Creates a new single-segment heap from a mutable slice of uninitialised memory.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use core::mem::MaybeUninit;
+    /// let mut buffer = [MaybeUninit::<u8>::uninit(); 1024];
+    /// let heap = Heap::from_slice(&mut buffer);
+    /// assert_eq!(heap.size(), 1024);
+    /// ```    pub fn from_slice(mem: &'static mut [MaybeUninit<u8>]) -> Heap {
         let size = mem.len();
         let address = mem.as_mut_ptr().cast();
         // SAFETY: The given address and size is valid according to the safety invariants of the
@@ -170,74 +462,36 @@ impl Heap {
         unsafe { Self::new(address, size) }
     }
 
-    /// Allocates a chunk of the given size with the given alignment. Returns a pointer to the
-    /// beginning of that chunk if it was successful. Else it returns `None`.
-    /// This function scans the list of free memory blocks and uses the first block that is big
-    /// enough. The runtime is in O(n) where n is the number of free blocks, but it should be
-    /// reasonably fast for small allocations.
-    //
-    // NOTE: We could probably replace this with an `Option` instead of a `Result` in a later
-    // release to remove this clippy warning
-    #[allow(clippy::result_unit_err)]
-    pub fn allocate_first_fit(&mut self, layout: Layout) -> Result<NonNull<u8>, ()> {
-        match self.holes.allocate_first_fit(layout) {
-            Ok((ptr, aligned_layout)) => {
-                self.used += aligned_layout.size();
-                Ok(ptr)
-            }
-            Err(err) => Err(err),
-        }
-    }
-
-    /// Frees the given allocation. `ptr` must be a pointer returned
-    /// by a call to the `allocate_first_fit` function with identical size and alignment.
-    ///
-    /// This function walks the list of free memory blocks and inserts the freed block at the
-    /// correct place. If the freed block is adjacent to another free block, the blocks are merged
-    /// again. This operation is in `O(n)` since the list needs to be sorted by address.
-    ///
-    /// # Safety
-    ///
-    /// `ptr` must be a pointer returned by a call to the [`allocate_first_fit`] function with
-    /// identical layout. Undefined behavior may occur for invalid arguments.
-    pub unsafe fn deallocate(&mut self, ptr: NonNull<u8>, layout: Layout) {
-        self.used -= self.holes.deallocate(ptr, layout).size();
-    }
-
     /// Returns the bottom address of the heap.
     ///
     /// The bottom pointer is automatically aligned, so the returned pointer
-    /// might be larger than the bottom pointer used for initialization.
-    pub fn bottom(&self) -> *mut u8 {
-        self.holes.bottom
-    }
-
-    /// Returns the size of the heap.
+    /// Returns the starting address of the first segment's memory region.
     ///
-    /// This is the size the heap is using for allocations, not necessarily the
-    /// total amount of bytes given to the heap. To determine the exact memory
-    /// boundaries, use [`bottom`][Self::bottom] and [`top`][Self::top].
-    pub fn size(&self) -> usize {
-        unsafe { self.holes.top.offset_from(self.holes.bottom) as usize }
+    /// # Examples
+    ///
+    /// ```
+    /// let mut heap = Heap::from_slice(Box::leak(Box::new([core::mem::MaybeUninit::<u8>::uninit(); 1024])));
+    /// assert_eq!(heap.bottom(), heap.holes[0].bottom);
+    /// ```    pub fn bottom(&self) -> *mut u8 {
+        self.holes[0].bottom
     }
 
     /// Return the top address of the heap.
     ///
     /// Note: The heap may choose to not use bytes at the end for allocations
     /// until there is enough room for metadata, but it still retains ownership
-    /// over memory from [`bottom`][Self::bottom] to the address returned.
-    pub fn top(&self) -> *mut u8 {
-        unsafe { self.holes.top.add(self.holes.pending_extend as usize) }
-    }
-
-    /// Returns the size of the used part of the heap
-    pub fn used(&self) -> usize {
-        self.used
-    }
-
-    /// Returns the size of the free part of the heap
-    pub fn free(&self) -> usize {
-        self.size() - self.used
+    /// Returns the top address of the heap, including any pending extension bytes.
+    ///
+    /// The returned pointer marks the end of the heap's memory region, which may include additional space reserved for future extension.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut heap = Heap::from_slice(Box::leak(Box::new([core::mem::MaybeUninit::<u8>::uninit(); 1024])));
+    /// let top = heap.top();
+    /// assert!(top as usize >= heap.bottom() as usize);
+    /// ```    pub fn top(&self) -> *mut u8 {
+        unsafe { self.holes[0].top.add(self.holes[0].pending_extend as usize) }
     }
 
     /// Extends the size of the heap by creating a new hole at the end.
@@ -257,21 +511,33 @@ impl Heap {
     ///
     /// Even if this operation doesn't increase the [usable size][`Self::size`]
     /// by exactly `by` bytes, those bytes are still owned by the Heap for
-    /// later use.
-    pub unsafe fn extend(&mut self, by: usize) {
-        self.holes.extend(by);
+    /// ```    pub unsafe fn extend(&mut self, by: usize) {
+        self.holes[0].extend(by);
     }
 }
 
 #[cfg(all(feature = "alloc_ref", feature = "use_spin"))]
 unsafe impl Allocator for LockedHeap {
+    /// Allocates a memory block with the specified layout from the heap.
+    ///
+    /// Returns a non-null pointer to a memory region of the requested size and alignment on success, or an allocation error if no suitable block is available.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use core::alloc::{Allocator, Layout};
+    /// let heap = LockedHeap::new(heap_start, heap_size);
+    /// let layout = Layout::from_size_align(128, 8).unwrap();
+    /// let ptr = heap.allocate(layout);
+    /// assert!(ptr.is_ok());
+    /// ```
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         if layout.size() == 0 {
             return Ok(NonNull::slice_from_raw_parts(layout.dangling(), 0));
         }
         match self.0.lock().allocate_first_fit(layout) {
-            Ok(ptr) => Ok(NonNull::slice_from_raw_parts(ptr, layout.size())),
-            Err(()) => Err(AllocError),
+            Some(ptr) => Ok(NonNull::slice_from_raw_parts(ptr, layout.size())),
+            None => Err(AllocError),
         }
     }
 
@@ -308,11 +574,25 @@ impl LockedHeap {
     /// This function is unsafe because it can cause undefined behavior if the given address
     /// is invalid.
     ///
-    /// The provided memory range must be valid for the `'static` lifetime.
-    pub unsafe fn new(heap_bottom: *mut u8, heap_size: usize) -> LockedHeap {
+    /// Creates a new locked heap allocator from a raw memory region.
+    ///
+    /// # Safety
+    ///
+    /// The provided memory range must be valid, non-overlapping, and remain accessible for the entire program lifetime.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use core::mem::MaybeUninit;
+    /// use my_allocator::LockedHeap;
+    ///
+    /// let mut mem = [MaybeUninit::uninit(); 4096];
+    /// let heap = unsafe { LockedHeap::new(mem.as_mut_ptr() as *mut u8, mem.len()) };
+    /// ```
+    pub unsafe fn new(heap_bottom: *mut u8, heap_size: usize) -> LockedHeap {    pub unsafe fn new(heap_bottom: *mut u8, heap_size: usize) -> LockedHeap {
         LockedHeap(Spinlock::new(Heap {
             used: 0,
-            holes: HoleList::new(heap_bottom, heap_size),
+            holes: [HoleList::new(heap_bottom, heap_size)],
         }))
     }
 }
@@ -328,11 +608,26 @@ impl Deref for LockedHeap {
 
 #[cfg(feature = "use_spin")]
 unsafe impl GlobalAlloc for LockedHeap {
+    /// Allocates a memory block with the specified layout from the heap.
+    ///
+    /// Returns a pointer to the allocated memory, or null if allocation fails. The memory is allocated from the underlying heap with thread-safe locking.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure the layout is valid and that the returned pointer is used according to Rust's allocation rules.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use core::alloc::Layout;
+    /// let heap = LockedHeap::new(heap_bottom, heap_size);
+    /// let ptr = unsafe { heap.alloc(Layout::from_size_align(64, 8).unwrap()) };
+    /// assert!(!ptr.is_null());
+    /// ```
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         self.0
             .lock()
             .allocate_first_fit(layout)
-            .ok()
             .map_or(core::ptr::null_mut(), |allocation| allocation.as_ptr())
     }
 
