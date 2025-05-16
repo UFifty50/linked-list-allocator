@@ -6,8 +6,6 @@ on:
       - 'main'
     tags:
       - '*'
-  schedule:
-    - cron: '40 5 * * *'   # every day at 5:40
   pull_request:
 
 env:
