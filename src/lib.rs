@@ -58,7 +58,7 @@ unsafe impl Send for Heap {}
 
 impl<const SEGMENTS: usize> SegmentedHeap<SEGMENTS> {
     /// Creates an empty heap. All allocate calls will return `None`.
-    pub const fn empty() -> Self {
+    pub fn empty() -> Self {
         Self {
             used: 0,
             holes: core::array::from_fn(|_| HoleList::empty()),
@@ -114,8 +114,8 @@ impl<const SEGMENTS: usize> SegmentedHeap<SEGMENTS> {
         unsafe {
             self.holes
             .iter()
-            .filter(|1| !1.bottom.is_null())
-            .map(|1| 1.top.offset_from(1.bottom) as usize)
+            .filter(|h| !h.bottom.is_null())
+            .map(|h| h.top.offset_from(h.bottom) as usize)
             .sum()
         }
     }
