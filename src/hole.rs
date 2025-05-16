@@ -418,7 +418,7 @@ impl HoleList {
     /// The function performs exactly the same layout adjustments as [`allocate_first_fit`] and
     /// returns the aligned layout.
     pub unsafe fn deallocate(&mut self, ptr: NonNull<u8>, layout: Layout) -> Layout {
-        let aligned_layout = Self::align_layout(layout).unwrap_or_else(|e| panic!("align_layout({layout:?}) failed in deallocate: {e}"));
+        let aligned_layout = Self::align_layout(layout).unwrap_or_else(|e| panic!("{}", format!("align_layout({layout:?}) failed in deallocate: {e}")));
         deallocate(self, ptr.as_ptr(), aligned_layout.size());
         aligned_layout
     }
