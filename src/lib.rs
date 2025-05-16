@@ -405,7 +405,7 @@ pub struct LockedHeap(Spinlock<Heap>);
 
 #[cfg(feature = "use_spin")]
 impl LockedHeap {
-    pub const fn empty() -> LockedHeap {
+    pub fn empty() -> LockedHeap {
         LockedHeap(Spinlock::new(Heap::empty()))
     }
 
